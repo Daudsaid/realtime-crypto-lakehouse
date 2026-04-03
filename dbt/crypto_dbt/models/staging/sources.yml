@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: crypto
+    database: crypto_stream_db
+    schema: public
+    tables:
+      - name: crypto_ticks

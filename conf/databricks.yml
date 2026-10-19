@@ -1,0 +1,24 @@
+# Databricks profile: Unity Catalog tables <layer>.<table> in catalog `crypto`.
+# Checkpoints live in a UC Volume. Kafka/Postgres endpoints are injected via env vars by the job.
+platform: databricks
+use_tables: true
+catalog: crypto
+
+storage:
+  lakehouse_root: null
+  checkpoint_root: /Volumes/crypto/bronze/checkpoints
+
+kafka:
+  bootstrap_servers: null
+  topic: crypto.trades.raw
+  starting_offsets: earliest
+  max_offsets_per_trigger: 50000
+
+trigger:
+  processing_time: null
+  available_now: true
+
+postgres:
+  jdbc_url: null
+  user: null
+  schema: gold

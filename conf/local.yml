@@ -1,0 +1,23 @@
+# Local Docker profile: Delta tables addressed by PATH under the mounted ./data volume.
+platform: local
+use_tables: false
+catalog: null
+
+storage:
+  lakehouse_root: /app/data/lakehouse
+  checkpoint_root: /app/checkpoints
+
+kafka:
+  bootstrap_servers: kafka:29092
+  topic: crypto.trades.raw
+  starting_offsets: earliest
+  max_offsets_per_trigger: 5000
+
+trigger:
+  processing_time: 10 seconds
+  available_now: false
+
+postgres:
+  jdbc_url: jdbc:postgresql://postgres:5432/crypto
+  user: crypto
+  schema: gold

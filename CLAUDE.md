@@ -85,10 +85,18 @@ SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per m
 - Malformed JSON detected via the `_corrupt_record` field in the from_json schema (PERMISSIVE otherwise returns a struct of NULLs).
 - Verified: 150,404 bronze -> 150,400 silver + 3 quarantine (price_positive, symbol_allowed, payload_is_json); re-sent trade present twice in bronze, once in silver; 0 duplicate (symbol, trade_id).
 
+## Step 4 notes
+- gold.py: one streaming aggregation (update mode, 2 min watermark) in a single foreachBatch query that MERGEs gold.ohlc_1m and gold.volatility_1m on (symbol, minute). Checkpoint: checkpoints/gold_candles_1m (one query, two tables). Tables are created if missing via tables.ensure_table.
+- open/close use min_by/max_by on struct(trade_time, trade_id) so same-millisecond trades resolve deterministically. price_stddev is population stddev; return_pct is the fraction (close-open)/open, not x100. vwap = quote_volume/volume computed in double, cast to decimal(18,8).
+- Do not persist() the batch inside foreachBatch: the cached plan breaks Delta MERGE ("key not found: symbol#...").
+- Shutdown: signal handlers must be lock-free. threading.Event.set() in a handler deadlocked when `timeout` delivered SIGINT twice (child + process group). tables._StopRequest is a plain flag; a daemon watchdog thread os._exit(1)s if shutdown exceeds 30s. spark service has `init: true` so orphaned JVMs are reaped instead of lingering as zombies.
+- Bronze reads at most maxOffsetsPerTrigger=5000 per 10s, so after the pipeline has been off the lag takes a few minutes of bronze runtime to clear.
+- Verified: 128..162 candles, 0 invariant violations, 0 duplicate (symbol, minute), full independent recompute from silver matches, 9/9 completed BTCUSDT minutes match Binance klines exactly.
+
 ## Roadmap (one step at a time; commit after each)
 2. [DONE] Bronze     -> verify row count grows; restart resumes from checkpoint without duplicates
 3. [DONE] Silver + contract -> verify dedupe + quarantine (inject a bad message into Kafka to prove it)
-4. Gold               -> verify candles: high>=low, open/close within [low, high], unique (symbol, minute)
+4. [DONE] Gold       -> verify candles: high>=low, open/close within [low, high], unique (symbol, minute)
 5. Serve + Metabase   -> gold in Postgres; user builds dashboard; screenshots in docs/screenshots/
 6. Tests + CI         -> pytest with small local DataFrames (silver parse/contract/dedupe, gold OHLC math),
                          ruff, .github/workflows/ci.yml (build spark image or use setup-java + pip, run ruff + pytest)

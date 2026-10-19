@@ -10,9 +10,13 @@ import logging
 import os
 import signal
 import threading
+import time
+from collections.abc import Callable
 
+from delta.tables import DeltaTable
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.streaming import DataStreamWriter, StreamingQuery
+from pyspark.sql.types import StructType
 
 from crypto_pipeline.config import PipelineConfig
 
@@ -81,30 +85,106 @@ def start_stream(
     return writer.start(location)
 
 
-def _arm_shutdown_watchdog() -> None:
-    """Hard-exit if a graceful shutdown stalls, so a stuck JVM call can never hang the job."""
+def start_foreach_batch(
+    df: DataFrame,
+    cfg: PipelineConfig,
+    layer: str,
+    name: str,
+    batch_fn: Callable[[DataFrame, int], None],
+    output_mode: str = "update",
+) -> StreamingQuery:
+    """Start a foreachBatch query with its own checkpoint `<layer>_<name>` and the configured trigger."""
+    writer = (
+        df.writeStream.outputMode(output_mode)
+        .queryName(f"{layer}_{name}")
+        .option("checkpointLocation", checkpoint_path(cfg, layer, name))
+        .foreachBatch(batch_fn)
+    )
+    return with_trigger(writer, cfg).start()
 
-    def _kill() -> None:
-        log.error("Graceful shutdown exceeded %ss; forcing exit", SHUTDOWN_GRACE_SECONDS)
-        os._exit(1)
 
-    timer = threading.Timer(SHUTDOWN_GRACE_SECONDS, _kill)
-    timer.daemon = True
-    timer.start()
+def ensure_table(
+    spark: SparkSession, cfg: PipelineConfig, layer: str, table: str, schema: StructType
+) -> None:
+    """Create the Delta table (path or Unity Catalog) with `schema` if it does not exist yet."""
+    builder = DeltaTable.createIfNotExists(spark).addColumns(schema)
+    location = table_location(cfg, layer, table)
+    builder = builder.tableName(location) if cfg.use_tables else builder.location(location)
+    builder.execute()
+
+
+def upsert(
+    spark: SparkSession, cfg: PipelineConfig, layer: str, table: str, updates: DataFrame, keys: list[str]
+) -> None:
+    """MERGE `updates` into the table on `keys`: matched rows are replaced, new keys inserted."""
+    location = table_location(cfg, layer, table)
+    target = DeltaTable.forName(spark, location) if cfg.use_tables else DeltaTable.forPath(spark, location)
+    condition = " AND ".join(f"t.{key} = s.{key}" for key in keys)
+    (
+        target.alias("t")
+        .merge(updates.alias("s"), condition)
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+
+
+class _StopRequest:
+    """Lock-free stop flag: a signal handler may run at any point, even inside another handler.
+
+    Handlers must not take locks (threading.Event.set() deadlocks if a second signal arrives
+    while the first handler is inside it, which `timeout` provokes by signalling the whole
+    process group). A single attribute assignment is safe.
+    """
+
+    requested_at: float | None = None
+
+    def __call__(self, signum: int, frame: object) -> None:
+        if self.requested_at is None:
+            self.requested_at = time.monotonic()
+
+    def sleep(self, seconds: float) -> bool:
+        """Sleep up to `seconds` in short slices; return True as soon as a stop is requested."""
+        deadline = time.monotonic() + seconds
+        while self.requested_at is None and time.monotonic() < deadline:
+            time.sleep(0.2)
+        return self.requested_at is not None
+
+
+def _start_shutdown_watchdog(stop: _StopRequest) -> None:
+    """Hard-exit if a requested shutdown takes longer than the grace period.
+
+    Runs in its own daemon thread from startup, so it works even if the main thread is stuck
+    in a JVM call. Uses os.write (no logging locks) before os._exit.
+    """
+
+    def _watch() -> None:
+        while True:
+            time.sleep(0.5)
+            if (
+                stop.requested_at is not None
+                and time.monotonic() - stop.requested_at > SHUTDOWN_GRACE_SECONDS
+            ):
+                os.write(2, f"Graceful shutdown exceeded {SHUTDOWN_GRACE_SECONDS}s; forcing exit\n".encode())
+                os._exit(1)
+
+    threading.Thread(target=_watch, name="shutdown-watchdog", daemon=True).start()
 
 
 def await_queries(queries: list[StreamingQuery], poll_seconds: int = 5) -> None:
     """Block until a query ends or SIGINT/SIGTERM arrives, logging each new micro-batch.
 
-    The signal handlers only set a flag (raising inside a py4j call corrupts the gateway); all
-    queries are then stopped gracefully. The first query failure is re-raised.
+    The signal handlers only set a lock-free flag (raising inside a py4j call corrupts the
+    gateway); all queries are then stopped gracefully, with a hard-exit watchdog as a backstop.
+    The first query failure is re-raised.
     """
-    stop_requested = threading.Event()
+    stop = _StopRequest()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: stop_requested.set())
+        signal.signal(sig, stop)
+    _start_shutdown_watchdog(stop)
 
     last_batch: dict[str, int] = {}
-    while not stop_requested.wait(poll_seconds) and all(q.isActive for q in queries):
+    while not stop.sleep(poll_seconds) and all(q.isActive for q in queries):
         for query in queries:
             progress = query.lastProgress
             if progress and progress["batchId"] != last_batch.get(query.name):
@@ -116,9 +196,8 @@ def await_queries(queries: list[StreamingQuery], poll_seconds: int = 5) -> None:
                     progress["numInputRows"],
                     progress.get("processedRowsPerSecond") or 0.0,
                 )
-    if stop_requested.is_set():
+    if stop.requested_at is not None:
         log.info("Stopping %s", ", ".join(q.name for q in queries))
-        _arm_shutdown_watchdog()
     for query in queries:
         query.stop()
     for query in queries:

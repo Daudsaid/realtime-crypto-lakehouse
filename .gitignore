@@ -1,8 +1,0 @@
-.env
-.venv/
-__pycache__/
-*.pyc
-logs/
-dbt/crypto_dbt/logs/
-dbt/crypto_dbt/target/
-dbt/crypto_dbt/.user.yml

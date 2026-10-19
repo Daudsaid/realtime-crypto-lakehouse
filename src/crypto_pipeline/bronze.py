@@ -9,6 +9,7 @@ import logging
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.streaming import StreamingQuery
 
 from crypto_pipeline.config import PipelineConfig, load_config
 from crypto_pipeline.spark import get_spark
@@ -44,13 +45,17 @@ def to_bronze(kafka_df: DataFrame) -> DataFrame:
     ).withColumn("ingest_date", F.to_date("ingest_ts"))
 
 
-def run(cfg: PipelineConfig | None = None) -> None:
-    """Start the bronze stream and block until it terminates."""
-    cfg = cfg or load_config()
-    spark = get_spark("crypto-bronze", cfg)
+def start(spark: SparkSession, cfg: PipelineConfig) -> list[StreamingQuery]:
+    """Start the bronze stream on an existing session."""
     query = start_stream(to_bronze(read_kafka(spark, cfg)), cfg, LAYER, TABLE, partition_by=["ingest_date"])
     log.info("Started %s -> %s.%s", cfg.kafka.topic, LAYER, TABLE)
-    await_queries([query])
+    return [query]
+
+
+def run(cfg: PipelineConfig | None = None) -> None:
+    """Run bronze standalone and block until it terminates."""
+    cfg = cfg or load_config()
+    await_queries(start(get_spark("crypto-bronze", cfg), cfg))
 
 
 if __name__ == "__main__":

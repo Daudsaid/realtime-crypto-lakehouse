@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import logging
 
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.streaming import StreamingQuery
 
 from crypto_pipeline.config import PipelineConfig, load_config
 from crypto_pipeline.contract import Contract, load_contract, reason_column
@@ -95,22 +96,24 @@ def to_quarantine(invalid: DataFrame) -> DataFrame:
     )
 
 
-def run(cfg: PipelineConfig | None = None) -> None:
-    """Start the silver and quarantine streams and block until one terminates."""
-    cfg = cfg or load_config()
-    spark = get_spark("crypto-silver", cfg)
+def start(spark: SparkSession, cfg: PipelineConfig) -> list[StreamingQuery]:
+    """Start the silver and quarantine streams on an existing session."""
     contract = load_contract(cfg.contract_path)
     log.info("Loaded contract %s v%s", contract.id, contract.version)
 
     classified = classify(read_stream(spark, cfg, "bronze", "trades_raw"), contract)
     valid = dedupe_trades(to_silver(classified.filter(F.col(REASON_COL).isNull())))
     invalid = to_quarantine(classified.filter(F.col(REASON_COL).isNotNull()))
-
-    queries = [
+    return [
         start_stream(valid, cfg, LAYER, TABLE),
         start_stream(invalid, cfg, LAYER, QUARANTINE_TABLE),
     ]
-    await_queries(queries)
+
+
+def run(cfg: PipelineConfig | None = None) -> None:
+    """Run silver standalone and block until a stream terminates."""
+    cfg = cfg or load_config()
+    await_queries(start(get_spark("crypto-silver", cfg), cfg))
 
 
 if __name__ == "__main__":

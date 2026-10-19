@@ -1,3 +1,25 @@
+x-spark: &spark
+  image: crypto-stream-pipeline-spark
+  build:
+    context: .
+    dockerfile: spark/Dockerfile
+  init: true
+  environment:
+    PIPELINE_ENV: local
+    KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    KAFKA_TOPIC: crypto.trades.raw
+    POSTGRES_JDBC_URL: jdbc:postgresql://postgres:5432/crypto
+    POSTGRES_USER: ${POSTGRES_USER:-crypto}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto}
+  volumes:
+    - ./src:/app/src
+    - ./conf:/app/conf
+    - ./contracts:/app/contracts
+    - ./tests:/app/tests
+    - ./data:/app/data
+    - ./checkpoints:/app/checkpoints
+    - ivy-cache:/root/.ivy2
+
 services:
   kafka:
     image: apache/kafka:4.0.0
@@ -80,33 +102,31 @@ services:
       BINANCE_WS_BASE: wss://data-stream.binance.vision
       LOG_LEVEL: INFO
 
+  # Interactive container for ad-hoc jobs, tests and lint (`docker compose exec spark ...`).
   spark:
-    build:
-      context: .
-      dockerfile: spark/Dockerfile
-    init: true
+    <<: *spark
     depends_on:
       kafka:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    environment:
-      PIPELINE_ENV: local
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_TOPIC: crypto.trades.raw
-      POSTGRES_JDBC_URL: jdbc:postgresql://postgres:5432/crypto
-      POSTGRES_USER: ${POSTGRES_USER:-crypto}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto}
     ports:
       - "4040:4040"
-    volumes:
-      - ./src:/app/src
-      - ./conf:/app/conf
-      - ./contracts:/app/contracts
-      - ./tests:/app/tests
-      - ./data:/app/data
-      - ./checkpoints:/app/checkpoints
-      - ivy-cache:/root/.ivy2
+
+  # The live lakehouse: bronze, silver, gold and serve in one SparkSession.
+  # Do not run the individual jobs from the spark container while this is up (shared checkpoints).
+  pipeline:
+    <<: *spark
+    command: ["python", "-m", "crypto_pipeline.run_all"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:

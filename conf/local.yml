@@ -14,7 +14,7 @@ kafka:
   bootstrap_servers: kafka:29092
   topic: crypto.trades.raw
   starting_offsets: earliest
-  max_offsets_per_trigger: 5000
+  max_offsets_per_trigger: 50000
 
 trigger:
   processing_time: 10 seconds

@@ -1,6 +1,7 @@
-# CLAUDE.md: crypto-stream-pipeline
+# CLAUDE.md: realtime-crypto-lakehouse
 
 ## Purpose
+Repo: https://github.com/Daudsaid/realtime-crypto-lakehouse (local folder is still crypto-stream-pipeline; compose project, container and volume names are unchanged on purpose).
 Portfolio project for London data engineering roles (fintech, banks, trading firms, Databricks shops).
 A real-time crypto market-data lakehouse:
 live Binance trades -> Kafka -> Spark Structured Streaming -> Delta Lake medallion (bronze/silver/gold)
@@ -32,7 +33,9 @@ Hiring managers will read this repo: clean code, tests, clear commits and README
 
 ## Run commands
 - Start stack:   docker compose up -d --build
-- Run a job:     docker compose exec spark python -m crypto_pipeline.<bronze|silver|gold|serve>
+- Run a job:     docker compose exec spark python -m crypto_pipeline.<bronze|silver|gold|serve>  (stop the pipeline service first: shared checkpoints)
+- Live lakehouse: docker compose up -d  (service `pipeline` = python -m crypto_pipeline.run_all, all layers in one SparkSession)
+- Metabase as code: python3 scripts/setup_metabase.py  (idempotent; needs MB_ADMIN_EMAIL/MB_ADMIN_PASSWORD in .env)
 - Tests:         docker compose exec spark pytest -q
 - Lint:          docker compose exec spark ruff check src tests
 
@@ -93,11 +96,19 @@ SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per m
 - Bronze reads at most maxOffsetsPerTrigger=5000 per 10s, so after the pipeline has been off the lag takes a few minutes of bronze runtime to clear.
 - Verified: 128..162 candles, 0 invariant violations, 0 duplicate (symbol, minute), full independent recompute from silver matches, 9/9 completed BTCUSDT minutes match Binance klines exactly.
 
+## Step 5 notes
+- Gold tables have Delta Change Data Feed on (ensure_table(change_feed=True), ALTER on existing tables). serve.py streams each table's CDF (initial snapshot first, so history backfills), keeps the newest post-image per (symbol, minute) per batch, writes it to Postgres staging.<table> via JDBC (truncate+overwrite), then INSERT ... ON CONFLICT (symbol, minute) DO UPDATE into gold.<table>. Staging lives in its own schema so Metabase (schema filter: gold) never sees it. DDL is derived from schemas.py.
+- Serve is local-only: serve.start returns [] (no-op) when use_tables is true; on Databricks query gold with Databricks SQL.
+- Every job module exposes start(spark, cfg) -> list[StreamingQuery] plus run(); run_all.py starts all four on one session. Compose: `spark` (idle, for exec) and `pipeline` share one image via an x-spark anchor; pipeline has restart: unless-stopped, init: true, stop_grace_period: 45s (watchdog fires at 30s).
+- The pipeline container uses ~2.3 GiB of the ~3.9 GiB available to Docker; keep an eye on it before adding queries.
+- Metabase: all five questions are native SQL (line/line/bar/line/table) over gold.ohlc_1m and gold.volatility_1m, last 3 hours relative to the newest candle; dashboard "Crypto Market - Live" in collection "Crypto Market". Admin credentials come from .env (gitignored).
+- psycopg[binary] added to dependencies, py-spy to dev extras. max_offsets_per_trigger is now 50000 locally.
+
 ## Roadmap (one step at a time; commit after each)
 2. [DONE] Bronze     -> verify row count grows; restart resumes from checkpoint without duplicates
 3. [DONE] Silver + contract -> verify dedupe + quarantine (inject a bad message into Kafka to prove it)
 4. [DONE] Gold       -> verify candles: high>=low, open/close within [low, high], unique (symbol, minute)
-5. Serve + Metabase   -> gold in Postgres; user builds dashboard; screenshots in docs/screenshots/
+5. [DONE] Serve + Metabase -> gold in Postgres; user builds dashboard; screenshots in docs/screenshots/
 6. Tests + CI         -> pytest with small local DataFrames (silver parse/contract/dedupe, gold OHLC math),
                          ruff, .github/workflows/ci.yml (build spark image or use setup-java + pip, run ruff + pytest)
 7. Databricks         -> databricks.yml bundle (Declarative Automation Bundles, formerly Databricks Asset Bundles):
@@ -118,3 +129,10 @@ SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per m
 ## Git rules (strict)
 - NEVER run git commit, git push, or any git command that writes history. The user commits manually.
 - At the end of each step, only suggest a commit message (no Co-Authored-By, no Claude/AI trailers).
+
+## Author (use in README, step 8)
+Daud Abdi, Associate Data Engineer, London, UK
+Email: daudsaidabdi@gmail.com
+GitHub: https://github.com/Daudsaid
+LinkedIn: https://www.linkedin.com/in/daudabdi0506
+Website: https://daudabdi.com

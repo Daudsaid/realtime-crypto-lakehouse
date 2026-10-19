@@ -5,20 +5,25 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crypto-pipeline"
 version = "0.1.0"
-description = "Real-time crypto market-data lakehouse: Kafka -> Spark -> Delta (bronze/silver/gold) -> Postgres/Metabase, deployable to Databricks."
+description = "realtime-crypto-lakehouse: live Binance trades to Kafka, Spark Structured Streaming, a Delta Lake medallion, Postgres and Metabase. Databricks-ready."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
-authors = [{ name = "Daud Said" }]
+authors = [{ name = "Daud Abdi", email = "daudsaidabdi@gmail.com" }]
 dependencies = [
     "pyspark>=3.5,<3.6",
     "delta-spark>=3.2,<3.4",
     "pyyaml>=6.0",
+    "psycopg[binary]>=3.2,<4",
 ]
+
+[project.urls]
+Repository = "https://github.com/Daudsaid/realtime-crypto-lakehouse"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "py-spy>=0.3",
 ]
 dbt = [
     "dbt-databricks>=1.8",

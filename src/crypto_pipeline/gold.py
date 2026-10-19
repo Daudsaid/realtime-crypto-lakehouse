@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import logging
 
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.streaming import StreamingQuery
 
 from crypto_pipeline.config import PipelineConfig, load_config
 from crypto_pipeline.schemas import OHLC_SCHEMA, PRICE_TYPE, VOLATILITY_SCHEMA, VOLUME_TYPE
@@ -83,12 +84,10 @@ def to_volatility(candles: DataFrame) -> DataFrame:
     )
 
 
-def run(cfg: PipelineConfig | None = None) -> None:
-    """Create the gold tables if missing, then start the candle stream and block until it ends."""
-    cfg = cfg or load_config()
-    spark = get_spark("crypto-gold", cfg)
-    ensure_table(spark, cfg, LAYER, OHLC_TABLE, OHLC_SCHEMA)
-    ensure_table(spark, cfg, LAYER, VOLATILITY_TABLE, VOLATILITY_SCHEMA)
+def start(spark: SparkSession, cfg: PipelineConfig) -> list[StreamingQuery]:
+    """Create the gold tables if missing (change feed on, for serving), then start the candle stream."""
+    ensure_table(spark, cfg, LAYER, OHLC_TABLE, OHLC_SCHEMA, change_feed=True)
+    ensure_table(spark, cfg, LAYER, VOLATILITY_TABLE, VOLATILITY_SCHEMA, change_feed=True)
 
     def write_batch(batch: DataFrame, batch_id: int) -> None:
         # No batch.persist(): a cached plan breaks Delta MERGE attribute resolution.
@@ -97,8 +96,13 @@ def run(cfg: PipelineConfig | None = None) -> None:
         log.info("gold batch=%s merged into %s and %s", batch_id, OHLC_TABLE, VOLATILITY_TABLE)
 
     trades = read_stream(spark, cfg, "silver", "trades").withWatermark("trade_time", WATERMARK)
-    query = start_foreach_batch(aggregate_candles(trades), cfg, LAYER, QUERY_NAME, write_batch)
-    await_queries([query])
+    return [start_foreach_batch(aggregate_candles(trades), cfg, LAYER, QUERY_NAME, write_batch)]
+
+
+def run(cfg: PipelineConfig | None = None) -> None:
+    """Run gold standalone and block until the stream terminates."""
+    cfg = cfg or load_config()
+    await_queries(start(get_spark("crypto-gold", cfg), cfg))
 
 
 if __name__ == "__main__":

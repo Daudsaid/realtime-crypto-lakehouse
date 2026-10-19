@@ -27,6 +27,7 @@ def _local_session(app_name: str) -> SparkSession:
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.driver.memory", "2g")
+        .config("spark.ui.showConsoleProgress", "false")
     )
     spark = configure_spark_with_delta_pip(builder, extra_packages=EXTRA_PACKAGES).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")

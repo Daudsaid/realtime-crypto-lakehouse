@@ -53,6 +53,18 @@ def read_stream(spark: SparkSession, cfg: PipelineConfig, layer: str, table: str
     return spark.readStream.format("delta").load(location)
 
 
+def read_changes(spark: SparkSession, cfg: PipelineConfig, layer: str, table: str) -> DataFrame:
+    """Stream the Delta Change Data Feed: an initial snapshot as inserts, then row-level changes.
+
+    Adds _change_type, _commit_version and _commit_timestamp; the table must have the feed enabled.
+    """
+    reader = spark.readStream.format("delta").option("readChangeFeed", "true")
+    location = table_location(cfg, layer, table)
+    if cfg.use_tables:
+        return reader.table(location)
+    return reader.load(location)
+
+
 def with_trigger(writer: DataStreamWriter, cfg: PipelineConfig) -> DataStreamWriter:
     """Apply the configured trigger (available_now takes precedence over processing_time)."""
     if cfg.trigger.available_now:
@@ -103,25 +115,40 @@ def start_foreach_batch(
     return with_trigger(writer, cfg).start()
 
 
+def _delta_table(spark: SparkSession, cfg: PipelineConfig, layer: str, table: str) -> DeltaTable:
+    location = table_location(cfg, layer, table)
+    return DeltaTable.forName(spark, location) if cfg.use_tables else DeltaTable.forPath(spark, location)
+
+
 def ensure_table(
-    spark: SparkSession, cfg: PipelineConfig, layer: str, table: str, schema: StructType
+    spark: SparkSession,
+    cfg: PipelineConfig,
+    layer: str,
+    table: str,
+    schema: StructType,
+    change_feed: bool = False,
 ) -> None:
-    """Create the Delta table (path or Unity Catalog) with `schema` if it does not exist yet."""
+    """Create the Delta table (path or Unity Catalog) if missing; optionally enable its change feed."""
     builder = DeltaTable.createIfNotExists(spark).addColumns(schema)
     location = table_location(cfg, layer, table)
     builder = builder.tableName(location) if cfg.use_tables else builder.location(location)
     builder.execute()
+
+    if change_feed:
+        properties = _delta_table(spark, cfg, layer, table).detail().first()["properties"]
+        if properties.get("delta.enableChangeDataFeed") != "true":
+            ident = location if cfg.use_tables else f"delta.`{location}`"
+            spark.sql(f"ALTER TABLE {ident} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
 
 
 def upsert(
     spark: SparkSession, cfg: PipelineConfig, layer: str, table: str, updates: DataFrame, keys: list[str]
 ) -> None:
     """MERGE `updates` into the table on `keys`: matched rows are replaced, new keys inserted."""
-    location = table_location(cfg, layer, table)
-    target = DeltaTable.forName(spark, location) if cfg.use_tables else DeltaTable.forPath(spark, location)
     condition = " AND ".join(f"t.{key} = s.{key}" for key in keys)
     (
-        target.alias("t")
+        _delta_table(spark, cfg, layer, table)
+        .alias("t")
         .merge(updates.alias("s"), condition)
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
@@ -149,6 +176,49 @@ class _StopRequest:
         while self.requested_at is None and time.monotonic() < deadline:
             time.sleep(0.2)
         return self.requested_at is not None
+
+
+SHUTDOWN_NOTE = "expected during shutdown: the in-flight batch is cancelled and replays from its checkpoint"
+# JVM loggers that report the cancelled batch as ERROR when queries are stopped mid-write.
+JVM_SHUTDOWN_LOGGERS = (
+    "org.apache.spark.sql.delta.files.DeltaFileFormatWriter",
+    "org.apache.spark.storage.ShuffleBlockFetcherIterator",
+    "org.apache.spark.broadcast.TorrentBroadcast",
+    "org.apache.spark.util.Utils",
+    "org.apache.spark.executor.Executor",
+    "org.apache.spark.rpc.netty.Inbox",
+)
+
+
+class ExpectedShutdownErrors(logging.Filter):
+    """Downgrade py4j callback ERRORs to WARNING once a shutdown was requested.
+
+    Stopping a query cancels its in-flight foreachBatch (e.g. a Delta MERGE), which py4j reports as
+    an ERROR with a traceback. That is expected, and safe because the batch replays on restart.
+    """
+
+    def __init__(self, stop: _StopRequest) -> None:
+        super().__init__()
+        self.stop = stop
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR and self.stop.requested_at is not None:
+            record.msg = f"{record.getMessage()} ({SHUTDOWN_NOTE})"
+            record.args = ()
+            record.levelno, record.levelname = logging.WARNING, "WARNING"
+            record.exc_info = record.exc_text = None
+        return True
+
+
+def _silence_jvm_shutdown_errors() -> None:
+    """Turn off the JVM loggers that report the cancelled in-flight batch as ERROR."""
+    spark = SparkSession.getActiveSession()
+    if spark is None:
+        return
+    jvm = spark.sparkContext._jvm
+    configurator = jvm.org.apache.logging.log4j.core.config.Configurator
+    for name in JVM_SHUTDOWN_LOGGERS:
+        configurator.setLevel(name, jvm.org.apache.logging.log4j.Level.OFF)
 
 
 def _start_shutdown_watchdog(stop: _StopRequest) -> None:
@@ -182,6 +252,7 @@ def await_queries(queries: list[StreamingQuery], poll_seconds: int = 5) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, stop)
     _start_shutdown_watchdog(stop)
+    logging.getLogger("py4j.clientserver").addFilter(ExpectedShutdownErrors(stop))
 
     last_batch: dict[str, int] = {}
     while not stop.sleep(poll_seconds) and all(q.isActive for q in queries):
@@ -197,7 +268,8 @@ def await_queries(queries: list[StreamingQuery], poll_seconds: int = 5) -> None:
                     progress.get("processedRowsPerSecond") or 0.0,
                 )
     if stop.requested_at is not None:
-        log.info("Stopping %s", ", ".join(q.name for q in queries))
+        log.warning("Stopping %s; %s", ", ".join(q.name for q in queries), SHUTDOWN_NOTE)
+        _silence_jvm_shutdown_errors()
     for query in queries:
         query.stop()
     for query in queries:

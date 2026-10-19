@@ -78,9 +78,16 @@ SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per m
 - tables.py also exposes table_location and await_query (SIGINT/SIGTERM set a flag, then the query is stopped gracefully; raising inside py4j corrupts the gateway).
 - Verified: 47,616 rows, offsets 0..47615 contiguous with no duplicates across a stop/restart (checkpoint resumed).
 
+## Step 3 notes
+- contracts/crypto_trades.yaml is the single source of rules; contract.py compiles `quality` rules to Spark expressions (reason = first violated rule, in contract order). Mounted into the spark container at /app/contracts; conf key `contract_path`.
+- silver.py runs two streaming queries from bronze (silver_trades with dropDuplicatesWithinWatermark, silver_trades_quarantine), each with its own checkpoint. No foreachBatch needed.
+- get_spark sets spark.sql.caseSensitive=true: Binance keys differ only by case (t/T, e/E, m/M).
+- Malformed JSON detected via the `_corrupt_record` field in the from_json schema (PERMISSIVE otherwise returns a struct of NULLs).
+- Verified: 150,404 bronze -> 150,400 silver + 3 quarantine (price_positive, symbol_allowed, payload_is_json); re-sent trade present twice in bronze, once in silver; 0 duplicate (symbol, trade_id).
+
 ## Roadmap (one step at a time; commit after each)
 2. [DONE] Bronze     -> verify row count grows; restart resumes from checkpoint without duplicates
-3. Silver + contract  -> verify dedupe + quarantine (inject a bad message into Kafka to prove it)
+3. [DONE] Silver + contract -> verify dedupe + quarantine (inject a bad message into Kafka to prove it)
 4. Gold               -> verify candles: high>=low, open/close within [low, high], unique (symbol, minute)
 5. Serve + Metabase   -> gold in Postgres; user builds dashboard; screenshots in docs/screenshots/
 6. Tests + CI         -> pytest with small local DataFrames (silver parse/contract/dedupe, gold OHLC math),

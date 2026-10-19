@@ -48,6 +48,7 @@ class PipelineConfig:
     catalog: str | None
     lakehouse_root: str | None
     checkpoint_root: str
+    contract_path: str
     kafka: KafkaConfig
     trigger: TriggerConfig
     postgres: PostgresConfig
@@ -65,6 +66,9 @@ def load_config(env: str | None = None, conf_dir: str | Path | None = None) -> P
     conf_dir = Path(conf_dir or os.environ.get("PIPELINE_CONF_DIR") or DEFAULT_CONF_DIR)
     raw = yaml.safe_load((conf_dir / f"{env}.yml").read_text())
 
+    contract_path = Path(_env("CONTRACT_PATH", raw["contract_path"]))
+    if not contract_path.is_absolute():
+        contract_path = conf_dir.parent / contract_path
     kafka, trigger, postgres, storage = raw["kafka"], raw["trigger"], raw["postgres"], raw["storage"]
     return PipelineConfig(
         env=env,
@@ -73,6 +77,7 @@ def load_config(env: str | None = None, conf_dir: str | Path | None = None) -> P
         catalog=raw.get("catalog"),
         lakehouse_root=storage.get("lakehouse_root"),
         checkpoint_root=storage["checkpoint_root"],
+        contract_path=str(contract_path),
         kafka=KafkaConfig(
             bootstrap_servers=_env("KAFKA_BOOTSTRAP_SERVERS", kafka.get("bootstrap_servers")),
             topic=_env("KAFKA_TOPIC", kafka["topic"]),

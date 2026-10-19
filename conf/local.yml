@@ -3,6 +3,9 @@ platform: local
 use_tables: false
 catalog: null
 
+# Absolute, or relative to the repo root (parent of the conf dir); env CONTRACT_PATH overrides.
+contract_path: /app/contracts/crypto_trades.yaml
+
 storage:
   lakehouse_root: /app/data/lakehouse
   checkpoint_root: /app/checkpoints

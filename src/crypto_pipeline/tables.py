@@ -7,6 +7,7 @@ Unity Catalog table name (Databricks, use_tables=true). Jobs never build paths t
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 
@@ -16,6 +17,8 @@ from pyspark.sql.streaming import DataStreamWriter, StreamingQuery
 from crypto_pipeline.config import PipelineConfig
 
 log = logging.getLogger(__name__)
+
+SHUTDOWN_GRACE_SECONDS = 30
 
 
 def table_location(cfg: PipelineConfig, layer: str, table: str) -> str:
@@ -78,30 +81,46 @@ def start_stream(
     return writer.start(location)
 
 
-def await_query(query: StreamingQuery, poll_seconds: int = 5) -> None:
-    """Block until the query ends, logging each new micro-batch.
+def _arm_shutdown_watchdog() -> None:
+    """Hard-exit if a graceful shutdown stalls, so a stuck JVM call can never hang the job."""
 
-    SIGINT/SIGTERM only set a flag (raising inside a py4j call corrupts the gateway), and the
-    loop then stops the query gracefully. Query failures are re-raised.
+    def _kill() -> None:
+        log.error("Graceful shutdown exceeded %ss; forcing exit", SHUTDOWN_GRACE_SECONDS)
+        os._exit(1)
+
+    timer = threading.Timer(SHUTDOWN_GRACE_SECONDS, _kill)
+    timer.daemon = True
+    timer.start()
+
+
+def await_queries(queries: list[StreamingQuery], poll_seconds: int = 5) -> None:
+    """Block until a query ends or SIGINT/SIGTERM arrives, logging each new micro-batch.
+
+    The signal handlers only set a flag (raising inside a py4j call corrupts the gateway); all
+    queries are then stopped gracefully. The first query failure is re-raised.
     """
     stop_requested = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop_requested.set())
 
-    last_batch = -1
-    while not stop_requested.is_set() and not query.awaitTermination(poll_seconds):
-        progress = query.lastProgress
-        if progress and progress["batchId"] != last_batch:
-            last_batch = progress["batchId"]
-            log.info(
-                "%s batch=%s rows=%s rate=%.1f rows/s",
-                query.name,
-                last_batch,
-                progress["numInputRows"],
-                progress.get("processedRowsPerSecond") or 0.0,
-            )
+    last_batch: dict[str, int] = {}
+    while not stop_requested.wait(poll_seconds) and all(q.isActive for q in queries):
+        for query in queries:
+            progress = query.lastProgress
+            if progress and progress["batchId"] != last_batch.get(query.name):
+                last_batch[query.name] = progress["batchId"]
+                log.info(
+                    "%s batch=%s rows=%s rate=%.1f rows/s",
+                    query.name,
+                    progress["batchId"],
+                    progress["numInputRows"],
+                    progress.get("processedRowsPerSecond") or 0.0,
+                )
     if stop_requested.is_set():
-        log.info("Stopping %s", query.name)
+        log.info("Stopping %s", ", ".join(q.name for q in queries))
+        _arm_shutdown_watchdog()
+    for query in queries:
         query.stop()
-    if query.exception():
-        raise query.exception()
+    for query in queries:
+        if query.exception():
+            raise query.exception()

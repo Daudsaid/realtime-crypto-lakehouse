@@ -39,6 +39,8 @@ def get_spark(app_name: str, cfg: PipelineConfig) -> SparkSession:
         spark = _local_session(app_name)
     else:
         spark = SparkSession.builder.getOrCreate()
+    # Binance payload keys differ only by case (t/T, e/E, m/M), so field resolution must be exact.
+    spark.conf.set("spark.sql.caseSensitive", "true")
 
     if cfg.use_tables:
         if cfg.catalog:

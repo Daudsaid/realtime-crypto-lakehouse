@@ -4,6 +4,9 @@ platform: databricks
 use_tables: true
 catalog: crypto
 
+# Absolute, or relative to the repo root (parent of the conf dir); env CONTRACT_PATH overrides.
+contract_path: contracts/crypto_trades.yaml
+
 storage:
   lakehouse_root: null
   checkpoint_root: /Volumes/crypto/bronze/checkpoints

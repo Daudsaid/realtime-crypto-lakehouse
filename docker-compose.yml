@@ -84,6 +84,7 @@ services:
     build:
       context: .
       dockerfile: spark/Dockerfile
+    init: true
     depends_on:
       kafka:
         condition: service_healthy
@@ -101,6 +102,7 @@ services:
     volumes:
       - ./src:/app/src
       - ./conf:/app/conf
+      - ./contracts:/app/contracts
       - ./tests:/app/tests
       - ./data:/app/data
       - ./checkpoints:/app/checkpoints

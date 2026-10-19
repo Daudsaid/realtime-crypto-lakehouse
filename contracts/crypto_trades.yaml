@@ -1,0 +1,66 @@
+# Data contract for silver.trades (ODCS-style). The pipeline reads the `quality` rules and the
+# `required` flags below at runtime (see crypto_pipeline/contract.py); rows that violate any
+# rule are routed to silver.trades_quarantine with the failing rule as `reason`.
+apiVersion: v3.0.0
+kind: DataContract
+id: crypto-trades
+name: crypto_trades
+version: 1.0.0
+status: active
+domain: market-data
+description:
+  purpose: Deduplicated, typed Binance spot trades (BTCUSDT, ETHUSDT) validated from the raw Kafka feed.
+  limitations: Trade time is exchange time; late duplicates beyond the 10 minute watermark are not detected.
+  usage: Source for gold OHLC and volatility aggregates.
+
+schema:
+  - name: trades
+    physicalType: table
+    physicalName: silver.trades
+    properties:
+      - {name: symbol, logicalType: string, required: true, description: Trading pair, e.g. BTCUSDT}
+      - {name: trade_id, logicalType: long, required: true, description: Exchange trade id, unique per symbol}
+      - {name: price, logicalType: decimal(18,8), required: true, description: Execution price in quote currency}
+      - {name: qty, logicalType: decimal(18,8), required: true, description: Executed quantity in base currency}
+      - {name: quote_qty, logicalType: decimal(38,8), required: false, description: price * qty, derived}
+      - {name: trade_time, logicalType: timestamp, required: true, description: Exchange trade time (UTC)}
+      - {name: event_time, logicalType: timestamp, required: true, description: Exchange event time (UTC)}
+      - {name: is_buyer_maker, logicalType: boolean, required: true, description: True if the buyer was the maker}
+
+quality:
+  - name: payload_is_json
+    type: library
+    rule: valid_json
+    severity: error
+    description: Kafka payload must parse as a Binance trade JSON object.
+  - name: required_not_null
+    type: library
+    rule: required_fields
+    severity: error
+    description: Every schema property marked required must be non-null after parsing and casting.
+  - name: price_positive
+    type: library
+    rule: positive
+    column: price
+    severity: error
+    description: price must be greater than 0.
+  - name: qty_positive
+    type: library
+    rule: positive
+    column: qty
+    severity: error
+    description: qty must be greater than 0.
+  - name: symbol_allowed
+    type: library
+    rule: allowed_values
+    column: symbol
+    values: [BTCUSDT, ETHUSDT]
+    severity: error
+    description: symbol must be one of the subscribed pairs.
+  - name: trade_time_not_future
+    type: library
+    rule: max_future_minutes
+    column: trade_time
+    minutes: 5
+    severity: error
+    description: trade_time must not be more than 5 minutes ahead of processing time.

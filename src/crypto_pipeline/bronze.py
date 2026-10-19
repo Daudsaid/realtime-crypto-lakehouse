@@ -12,7 +12,7 @@ from pyspark.sql import functions as F
 
 from crypto_pipeline.config import PipelineConfig, load_config
 from crypto_pipeline.spark import get_spark
-from crypto_pipeline.tables import await_query, start_stream
+from crypto_pipeline.tables import await_queries, start_stream
 
 LAYER, TABLE = "bronze", "trades_raw"
 log = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def run(cfg: PipelineConfig | None = None) -> None:
     spark = get_spark("crypto-bronze", cfg)
     query = start_stream(to_bronze(read_kafka(spark, cfg)), cfg, LAYER, TABLE, partition_by=["ingest_date"])
     log.info("Started %s -> %s.%s", cfg.kafka.topic, LAYER, TABLE)
-    await_query(query)
+    await_queries([query])
 
 
 if __name__ == "__main__":

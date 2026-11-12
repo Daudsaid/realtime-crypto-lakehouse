@@ -1,4 +1,4 @@
-"""Serve job: gold Delta tables -> Postgres schema `gold` for Metabase (local only).
+"""Serve job: gold Delta tables -> Postgres schema `gold` for querying (local only).
 
 Each gold table's Change Data Feed is streamed into Postgres. Per micro-batch the latest version of
 every changed (symbol, minute) is written to a staging table over JDBC, then upserted into the

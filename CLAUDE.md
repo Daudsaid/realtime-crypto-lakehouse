@@ -5,15 +5,15 @@ Repo: https://github.com/Daudsaid/realtime-crypto-lakehouse (local folder is sti
 Portfolio project for London data engineering roles (fintech, banks, trading firms, Databricks shops).
 A real-time crypto market-data lakehouse:
 live Binance trades -> Kafka -> Spark Structured Streaming -> Delta Lake medallion (bronze/silver/gold)
--> Postgres serving layer -> Metabase dashboard.
+-> Postgres serving layer.
 Runs fully in Docker locally. Must later deploy to Databricks (Unity Catalog) with CONFIG changes only, no rewrites.
 Hiring managers will read this repo: clean code, tests, clear commits and README matter as much as features.
 
 ## Current state (step 1 DONE and verified)
-- docker-compose.yml services: kafka, kafka-init, postgres, metabase, spark, producer. All healthy.
+- docker-compose.yml services: kafka, kafka-init, postgres, spark, producer, pipeline. All healthy.
 - Producer streams btcusdt@trade + ethusdt@trade into Kafka topic `crypto.trades.raw` (3 partitions, key = symbol).
   Verified ~28k messages. All land in partition 0 because 2 keys hash there: expected, keep it, document it.
-- scripts/healthcheck.sh may exist; Binance REST + Metabase /api/health verified with curl.
+- scripts/healthcheck.sh may exist; Binance REST verified with curl.
 - src/crypto_pipeline/*.py, conf/*.yml, tests/*.py, contracts/crypto_trades.yaml, databricks.yml, ci.yml are EMPTY stubs.
 
 ## Environment (fixed; do not change versions without asking)
@@ -23,9 +23,9 @@ Hiring managers will read this repo: clean code, tests, clear commits and README
   Jars via delta.configure_spark_with_delta_pip(builder, extra_packages=[
     "org.apache.spark:spark-sql-kafka-0-10_2.12:<pyspark.__version__>", "org.postgresql:postgresql:42.7.4"]).
 - Kafka apache/kafka:4.0.0 (KRaft). Inside Docker: kafka:29092. From Mac: localhost:9092.
-- Postgres 16: db `crypto` with schema `gold`; db `metabase` for Metabase metadata. User/pass crypto/crypto via .env (gitignored).
+- Postgres 16: db `crypto` with schema `gold`. User/pass crypto/crypto via .env (gitignored).
   JDBC from spark: jdbc:postgresql://postgres:5432/crypto (env POSTGRES_JDBC_URL, POSTGRES_USER, POSTGRES_PASSWORD).
-- Metabase localhost:3000. Spark UI localhost:4040.
+- Spark UI localhost:4040.
 - Spark container env: PIPELINE_ENV=local, KAFKA_BOOTSTRAP_SERVERS=kafka:29092, KAFKA_TOPIC=crypto.trades.raw.
 - NEVER add container_name to compose. Another project (tfl-disruptions-lakehouse) uses names kafka/postgres
   and the same ports; it is stopped while working here. Never touch its containers.
@@ -35,7 +35,6 @@ Hiring managers will read this repo: clean code, tests, clear commits and README
 - Start stack:   docker compose up -d --build
 - Run a job:     docker compose exec spark python -m crypto_pipeline.<bronze|silver|gold|serve>  (stop the pipeline service first: shared checkpoints)
 - Live lakehouse: docker compose up -d  (service `pipeline` = python -m crypto_pipeline.run_all, all layers in one SparkSession)
-- Metabase as code: python3 scripts/setup_metabase.py  (idempotent; needs MB_ADMIN_EMAIL/MB_ADMIN_PASSWORD in .env)
 - Tests:         docker compose exec spark pytest -q
 - Lint:          docker compose exec spark ruff check src tests
 
@@ -74,7 +73,7 @@ GOLD (from silver):
   trade_count, vwap. open/close = first/last by trade_time (use min_by/max_by). Watermark + append or update via MERGE.
   gold.volatility_1m: symbol, minute, price_range (high-low), price_stddev, return_pct ((close-open)/open), tick_count.
 
-SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per micro-batch), for Metabase.
+SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per micro-batch).
 
 ## Step 2 notes
 - Implemented conf/local.yml, conf/databricks.yml, config.py, spark.py, tables.py, bronze.py. schemas.py stays empty until step 3.
@@ -97,18 +96,17 @@ SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per m
 - Verified: 128..162 candles, 0 invariant violations, 0 duplicate (symbol, minute), full independent recompute from silver matches, 9/9 completed BTCUSDT minutes match Binance klines exactly.
 
 ## Step 5 notes
-- Gold tables have Delta Change Data Feed on (ensure_table(change_feed=True), ALTER on existing tables). serve.py streams each table's CDF (initial snapshot first, so history backfills), keeps the newest post-image per (symbol, minute) per batch, writes it to Postgres staging.<table> via JDBC (truncate+overwrite), then INSERT ... ON CONFLICT (symbol, minute) DO UPDATE into gold.<table>. Staging lives in its own schema so Metabase (schema filter: gold) never sees it. DDL is derived from schemas.py.
+- Gold tables have Delta Change Data Feed on (ensure_table(change_feed=True), ALTER on existing tables). serve.py streams each table's CDF (initial snapshot first, so history backfills), keeps the newest post-image per (symbol, minute) per batch, writes it to Postgres staging.<table> via JDBC (truncate+overwrite), then INSERT ... ON CONFLICT (symbol, minute) DO UPDATE into gold.<table>. Staging lives in its own schema so consumers of `gold` never see it. DDL is derived from schemas.py.
 - Serve is local-only: serve.start returns [] (no-op) when use_tables is true; on Databricks query gold with Databricks SQL.
 - Every job module exposes start(spark, cfg) -> list[StreamingQuery] plus run(); run_all.py starts all four on one session. Compose: `spark` (idle, for exec) and `pipeline` share one image via an x-spark anchor; pipeline has restart: unless-stopped, init: true, stop_grace_period: 45s (watchdog fires at 30s).
 - The pipeline container uses ~2.3 GiB of the ~3.9 GiB available to Docker; keep an eye on it before adding queries.
-- Metabase: all five questions are native SQL (line/line/bar/line/table) over gold.ohlc_1m and gold.volatility_1m, last 3 hours relative to the newest candle; dashboard "Crypto Market - Live" in collection "Crypto Market". Admin credentials come from .env (gitignored).
 - psycopg[binary] added to dependencies, py-spy to dev extras. max_offsets_per_trigger is now 50000 locally.
 
 ## Roadmap (one step at a time; commit after each)
 2. [DONE] Bronze     -> verify row count grows; restart resumes from checkpoint without duplicates
 3. [DONE] Silver + contract -> verify dedupe + quarantine (inject a bad message into Kafka to prove it)
 4. [DONE] Gold       -> verify candles: high>=low, open/close within [low, high], unique (symbol, minute)
-5. [DONE] Serve + Metabase -> gold in Postgres; user builds dashboard; screenshots in docs/screenshots/
+5. [DONE] Serve -> gold in Postgres. (Metabase was removed; no BI tool in the stack.)
 6. Tests + CI         -> pytest with small local DataFrames (silver parse/contract/dedupe, gold OHLC math),
                          ruff, .github/workflows/ci.yml (build spark image or use setup-java + pip, run ruff + pytest)
 7. Databricks         -> databricks.yml bundle (Declarative Automation Bundles, formerly Databricks Asset Bundles):

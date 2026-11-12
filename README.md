@@ -1,8 +1,6 @@
 # realtime-crypto-lakehouse
 
-A real-time crypto market-data lakehouse: live Binance trades → Kafka → Spark Structured Streaming → Delta Lake medallion → Postgres → Metabase, Databricks-ready.
-
-![Crypto Market - Live dashboard](docs/screenshots/dashboard.png)
+A real-time crypto market-data lakehouse: live Binance trades → Kafka → Spark Structured Streaming → Delta Lake medallion → Postgres, Databricks-ready.
 
 Runs fully local with one `docker compose up`. The same code targets Databricks (Unity Catalog) by switching a config file, not by rewriting jobs.
 
@@ -37,7 +35,6 @@ flowchart LR
     CT[["contracts/crypto_trades.yaml"]] --> SI
     CT --> QU
     SV --> PG[("Postgres 16<br/>schema gold")]
-    PG --> MB["Metabase<br/>Crypto Market - Live"]
 ```
 
 | Layer | Table | Grain | Purpose |
@@ -47,7 +44,7 @@ flowchart LR
 | Silver | `silver.trades_quarantine` | one row per rejected message | Original payload, the violated rule as `reason`, Kafka metadata, `quarantined_at`. |
 | Gold | `gold.ohlc_1m` | one row per `(symbol, minute)` | Open, high, low, close, volume, quote volume, trade count, VWAP. |
 | Gold | `gold.volatility_1m` | one row per `(symbol, minute)` | Price range, price stddev, return as a fraction, tick count. |
-| Serving | Postgres `gold.*` | same as gold | Query layer for Metabase, with `PRIMARY KEY (symbol, minute)`. |
+| Serving | Postgres `gold.*` | same as gold | Query layer for analysis and dashboards, with `PRIMARY KEY (symbol, minute)`. |
 
 ## Tech stack
 
@@ -58,15 +55,12 @@ flowchart LR
 | Processing | PySpark 3.5.9 Structured Streaming, Java 17 | Same engine locally and on Databricks. |
 | Storage | Delta Lake 3.3 (`delta-spark` 3.3.3) | ACID `MERGE`, change data feed, time travel. |
 | Serving | PostgreSQL 16, `psycopg` 3 | Fast dashboard queries; idempotent upserts. |
-| BI | Metabase (v0.64) | Dashboard defined as code through its REST API. |
 | Runtime | Docker Compose (OrbStack) | One command brings up the whole lakehouse. |
 | Quality | pytest, ruff | 20 unit tests, linted and formatted. |
 
-The Metabase image is tagged `latest` in `docker-compose.yml`; v0.64 is what the dashboard was built and tested against.
-
 ## Quick start
 
-Prerequisites: Docker (or OrbStack) with about 4 GiB of memory available, and Python 3 on the host for the Metabase setup script (standard library only).
+Prerequisites: Docker (or OrbStack) with about 4 GiB of memory available.
 
 ```bash
 git clone https://github.com/Daudsaid/realtime-crypto-lakehouse.git
@@ -74,26 +68,29 @@ cd realtime-crypto-lakehouse
 cp .env.example .env
 ```
 
-Edit `.env` and set `MB_ADMIN_PASSWORD` to a long password of your own, then start everything:
+Then start everything:
 
 ```bash
 docker compose up -d --build
 ```
 
-This starts Kafka, Postgres, Metabase, the Binance producer and the `pipeline` service (bronze, silver, gold and serve in one Spark session). Give it a couple of minutes for the first candles to land, then create the dashboard and check the stack:
+This starts Kafka, Postgres, the Binance producer and the `pipeline` service (bronze, silver, gold and serve in one Spark session). Give it a couple of minutes for the first candles to land, then check the stack:
 
 ```bash
-python3 scripts/setup_metabase.py
 bash scripts/healthcheck.sh
 ```
 
-The setup script is idempotent and prints the dashboard URL (open it, then log in with `MB_ADMIN_EMAIL` and `MB_ADMIN_PASSWORD` from `.env`). Re-run it any time to restore the dashboard. If it warns that the gold tables are not synced yet, wait a minute and run it again.
+To look at the candles directly:
+
+```bash
+docker compose exec postgres psql -U crypto -d crypto \
+  -c "select symbol, minute, open, high, low, close, volume from gold.ohlc_1m order by minute desc limit 10;"
+```
 
 Services and ports:
 
 | Service | URL or endpoint | Notes |
 | --- | --- | --- |
-| Metabase | http://localhost:3000 | Dashboard and admin login |
 | Postgres | localhost:5432 | Database `crypto`, schema `gold` (credentials in `.env`) |
 | Kafka | localhost:9092 | Topic `crypto.trades.raw`; `kafka:29092` inside Docker |
 | `pipeline` | none | Bronze, silver, gold and serve in one Spark session |
@@ -172,22 +169,20 @@ Possible reasons: `payload_is_json`, `required_not_null:<field>`, `price_positiv
 
 **Delta `MERGE` crash.** *Problem:* the gold `foreachBatch` failed with `key not found: symbol#808`. *Root cause:* `batch.persist()` put an `InMemoryRelation` in the plan, which Delta's `MERGE` could not remap. *Fix:* no caching inside `foreachBatch`; the batch is recomputed per `MERGE`.
 
-## Dashboard
+## Findings
 
-`scripts/setup_metabase.py` creates the collection, database connection and the "Crypto Market - Live" dashboard through Metabase's REST API, and archives cards it no longer defines. It also sets the report timezone to Europe/London and selects `minute AT TIME ZONE 'UTC'` so Metabase converts the stored UTC timestamps instead of relabelling them.
+From the gold tables in Postgres (19 Oct 2026 run):
 
-| | |
-| --- | --- |
-| ![BTCUSDT 1-min close price](docs/screenshots/btc-close-price.png) | ![ETHUSDT 1-min close price](docs/screenshots/eth-close-price.png) |
-| **BTC and ETH move together.** The correlation of their 1-minute returns is 0.915. | **Same shape, different scale.** ETH trades near 2,400 USDT against BTC near 82,000 USDT. |
-| ![Quote volume per minute](docs/screenshots/quote-volume.png) | ![Price range percent per minute](docs/screenshots/range-pct.png) |
-| **BTC dominates traded value.** BTCUSDT is 68.7% of all quote volume (133.7M of 194.7M USDT). | **ETH is consistently more volatile.** Its average one-minute range is 0.071% against 0.047% for BTC, and wider than BTC's in 86.8% of minutes. Volume spikes coincide with volatility spikes (correlation of quote volume and range: 0.62 for BTC, 0.54 for ETH). |
+- **BTC and ETH move together.** The correlation of their 1-minute returns is 0.915.
+- **Same shape, different scale.** ETH trades near 2,400 USDT against BTC near 82,000 USDT.
+- **BTC dominates traded value.** BTCUSDT is 68.7% of all quote volume (133.7M of 194.7M USDT).
+- **ETH is consistently more volatile.** Its average one-minute range is 0.071% against 0.047% for BTC, and wider than BTC's in 86.8% of minutes. Volume spikes coincide with volatility spikes (correlation of quote volume and range: 0.62 for BTC, 0.54 for ETH).
 
 ## Repository structure
 
 ```text
 .
-├── docker-compose.yml        Kafka, Postgres, Metabase, producer, spark (exec) and pipeline services
+├── docker-compose.yml        Kafka, Postgres, producer, spark (exec) and pipeline services
 ├── conf/
 │   ├── local.yml             Delta paths, Kafka and trigger settings for Docker
 │   └── databricks.yml        Unity Catalog profile (use_tables: true)
@@ -195,7 +190,7 @@ Possible reasons: `payload_is_json`, `required_not_null:<field>`, `price_positiv
 │   └── crypto_trades.yaml    Data contract enforced by silver
 ├── producer/                 Binance WebSocket to Kafka producer (own Dockerfile)
 ├── spark/Dockerfile          Python 3.11, Java 17, PySpark, Delta
-├── postgres/init/            Creates the metabase database and gold schema
+├── postgres/init/            Creates the gold schema
 ├── src/crypto_pipeline/
 │   ├── config.py             Frozen config from conf/<env>.yml plus env overrides
 │   ├── spark.py              SparkSession factory (local Delta or Databricks)
@@ -208,10 +203,8 @@ Possible reasons: `payload_is_json`, `required_not_null:<field>`, `price_positiv
 │   ├── serve.py              Change Data Feed to Postgres upserts
 │   └── run_all.py            All four jobs in one SparkSession
 ├── scripts/
-│   ├── setup_metabase.py     Idempotent Metabase setup (dashboard as code)
 │   └── healthcheck.sh        Stack smoke test
-├── tests/                    pytest suite (20 tests)
-└── docs/screenshots/         Dashboard images used in this README
+└── tests/                    pytest suite (20 tests)
 ```
 
 ## Testing
@@ -233,11 +226,10 @@ docker compose exec spark pytest -q
 
 Done:
 
-- [x] Kafka producer, KRaft broker, Postgres and Metabase in Docker Compose
+- [x] Kafka producer, KRaft broker and Postgres in Docker Compose
 - [x] Bronze, silver (data contract, dedupe, quarantine) and gold (OHLC, volatility) streaming jobs
 - [x] Idempotent Change Data Feed serving to Postgres
 - [x] Single-session `pipeline` service with clean shutdown
-- [x] Metabase dashboard as code
 - [x] Unit tests and lint (run locally in the container)
 
 Next:
@@ -247,7 +239,6 @@ Next:
 - [ ] dbt-databricks for the gold layer
 - [ ] More symbols, which also spreads load across Kafka partitions
 - [ ] Alerting, including a data-completeness check on trade-id gaps (the outages above were found by hand)
-- [ ] Pin the Metabase image version
 
 ## Author
 

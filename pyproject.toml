@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crypto-pipeline"
 version = "0.1.0"
-description = "realtime-crypto-lakehouse: live Binance trades to Kafka, Spark Structured Streaming, a Delta Lake medallion, Postgres and Metabase. Databricks-ready."
+description = "realtime-crypto-lakehouse: live Binance trades to Kafka, Spark Structured Streaming, a Delta Lake medallion and Postgres. Databricks-ready."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 authors = [{ name = "Daud Abdi", email = "daudsaidabdi@gmail.com" }]

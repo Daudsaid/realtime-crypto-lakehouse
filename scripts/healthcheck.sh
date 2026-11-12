@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-check the whole stack: services, Kafka, Postgres serving tables, Metabase and Binance REST.
+# Smoke-check the whole stack: services, Kafka, Postgres serving tables and Binance REST.
 # Usage: bash scripts/healthcheck.sh   (exits non-zero if any check fails)
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -25,10 +25,9 @@ pg_candles() {
     -c "select count(*) || ' candles, newest ' || max(minute) from gold.ohlc_1m"
 }
 
-for svc in kafka postgres metabase producer pipeline; do check "service $svc" service_up "$svc"; done
+for svc in kafka postgres producer pipeline; do check "service $svc" service_up "$svc"; done
 check "kafka topic crypto.trades.raw" kafka_messages
 check "postgres gold.ohlc_1m" pg_candles
-check "metabase /api/health" curl -fsS --max-time 10 http://localhost:3000/api/health
 check "binance REST ping" curl -fsS --max-time 10 https://data-api.binance.vision/api/v3/ping
 
 echo

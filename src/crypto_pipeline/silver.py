@@ -26,7 +26,7 @@ from crypto_pipeline.schemas import (
     REASON_COL,
 )
 from crypto_pipeline.spark import get_spark
-from crypto_pipeline.tables import await_queries, read_stream, start_stream
+from crypto_pipeline.tables import await_queries, read_stream, start_stream, wait_for_table
 
 LAYER, TABLE, QUARANTINE_TABLE = "silver", "trades", "trades_quarantine"
 DEDUPE_KEYS = ["symbol", "trade_id"]
@@ -101,6 +101,7 @@ def start(spark: SparkSession, cfg: PipelineConfig) -> list[StreamingQuery]:
     contract = load_contract(cfg.contract_path)
     log.info("Loaded contract %s v%s", contract.id, contract.version)
 
+    wait_for_table(spark, cfg, "bronze", "trades_raw")
     classified = classify(read_stream(spark, cfg, "bronze", "trades_raw"), contract)
     valid = dedupe_trades(to_silver(classified.filter(F.col(REASON_COL).isNull())))
     invalid = to_quarantine(classified.filter(F.col(REASON_COL).isNotNull()))

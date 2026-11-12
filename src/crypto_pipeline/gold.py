@@ -24,6 +24,7 @@ from crypto_pipeline.tables import (
     read_stream,
     start_foreach_batch,
     upsert,
+    wait_for_table,
 )
 
 LAYER, QUERY_NAME = "gold", "candles_1m"
@@ -95,6 +96,7 @@ def start(spark: SparkSession, cfg: PipelineConfig) -> list[StreamingQuery]:
         upsert(spark, cfg, LAYER, VOLATILITY_TABLE, to_volatility(batch), KEYS)
         log.info("gold batch=%s merged into %s and %s", batch_id, OHLC_TABLE, VOLATILITY_TABLE)
 
+    wait_for_table(spark, cfg, "silver", "trades")
     trades = read_stream(spark, cfg, "silver", "trades").withWatermark("trade_time", WATERMARK)
     return [start_foreach_batch(aggregate_candles(trades), cfg, LAYER, QUERY_NAME, write_batch)]
 

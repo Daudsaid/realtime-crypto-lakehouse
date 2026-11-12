@@ -141,6 +141,43 @@ def ensure_table(
             spark.sql(f"ALTER TABLE {ident} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
 
 
+def table_exists(spark: SparkSession, cfg: PipelineConfig, layer: str, table: str) -> bool:
+    """True once the table has been created (a Delta commit with a schema exists)."""
+    location = table_location(cfg, layer, table)
+    if cfg.use_tables:
+        return spark.catalog.tableExists(location)
+    return DeltaTable.isDeltaTable(spark, location)
+
+
+def wait_for_table(
+    spark: SparkSession,
+    cfg: PipelineConfig,
+    layer: str,
+    table: str,
+    timeout_seconds: float = 600,
+    poll_seconds: float = 2,
+) -> None:
+    """Block until an upstream table exists, so a downstream stream can read its schema.
+
+    On a fresh lakehouse, bronze and silver only exist after their first streaming commit. Starting
+    a Delta stream on a missing table fails with DELTA_SCHEMA_NOT_SET, so downstream jobs wait here.
+    Raises if an already-started query fails meanwhile (nothing will create the table) or on timeout.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    logged = False
+    while not table_exists(spark, cfg, layer, table):
+        for query in spark.streams.active:
+            error = query.exception()
+            if error is not None:
+                raise RuntimeError(f"{query.name} failed while waiting for {layer}.{table}") from error
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{layer}.{table} was not created within {timeout_seconds:.0f}s")
+        if not logged:
+            log.info("Waiting for %s.%s to receive its first commit", layer, table)
+            logged = True
+        time.sleep(poll_seconds)
+
+
 def upsert(
     spark: SparkSession, cfg: PipelineConfig, layer: str, table: str, updates: DataFrame, keys: list[str]
 ) -> None:

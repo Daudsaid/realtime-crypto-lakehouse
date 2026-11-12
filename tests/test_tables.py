@@ -6,6 +6,9 @@ import logging
 import sys
 import time
 
+import pytest
+
+from crypto_pipeline import tables
 from crypto_pipeline.tables import ExpectedShutdownErrors, _StopRequest
 
 
@@ -45,3 +48,41 @@ def test_stop_request_is_lock_free_and_keeps_first_timestamp() -> None:
     stop(2, None)
     assert first is not None
     assert stop.requested_at == first
+
+
+class _FakeQuery:
+    def __init__(self, name: str, error: Exception | None = None) -> None:
+        self.name, self._error = name, error
+
+    def exception(self) -> Exception | None:
+        return self._error
+
+
+class _FakeSpark:
+    def __init__(self, queries: list[_FakeQuery]) -> None:
+        self.streams = type("Streams", (), {"active": queries})()
+
+
+def test_wait_for_table_returns_once_upstream_table_exists(monkeypatch) -> None:
+    calls = iter([False, False, True])
+    monkeypatch.setattr(tables, "table_exists", lambda *args: next(calls))
+    monkeypatch.setattr(tables.time, "sleep", lambda seconds: None)
+
+    tables.wait_for_table(_FakeSpark([_FakeQuery("bronze_trades_raw")]), None, "bronze", "trades_raw")
+
+
+def test_wait_for_table_raises_if_upstream_query_failed(monkeypatch) -> None:
+    monkeypatch.setattr(tables, "table_exists", lambda *args: False)
+    monkeypatch.setattr(tables.time, "sleep", lambda seconds: None)
+    spark = _FakeSpark([_FakeQuery("bronze_trades_raw", RuntimeError("kafka down"))])
+
+    with pytest.raises(RuntimeError, match="bronze_trades_raw failed"):
+        tables.wait_for_table(spark, None, "bronze", "trades_raw")
+
+
+def test_wait_for_table_times_out(monkeypatch) -> None:
+    monkeypatch.setattr(tables, "table_exists", lambda *args: False)
+    monkeypatch.setattr(tables.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(TimeoutError, match="silver.trades"):
+        tables.wait_for_table(_FakeSpark([]), None, "silver", "trades", timeout_seconds=0)

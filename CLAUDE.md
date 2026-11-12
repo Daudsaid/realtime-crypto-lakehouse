@@ -118,7 +118,7 @@ SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per m
 7. Databricks         -> databricks.yml bundle (Declarative Automation Bundles, formerly Databricks Asset Bundles):
                          jobs for bronze/silver/gold, dev/prod targets, conf/databricks.yml, checkpoints in a UC Volume.
                          dbt-databricks for gold is optional here.
-8. README             -> architecture diagram (mermaid), stack table, how to run, design decisions,
+8. [DONE] README      -> architecture diagram (mermaid), stack table, how to run, design decisions,
                          data contract, screenshots, "what I'd add in production", interview talking points.
 
 ## Working rules

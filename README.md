@@ -2,6 +2,8 @@
 
 A real-time crypto market-data lakehouse: live Binance trades → Kafka → Spark Structured Streaming → Delta Lake medallion → Postgres → Streamlit, Databricks-ready.
 
+**🔴 Live dashboard: [realtime-crypto-lakehouse.streamlit.app](https://realtime-crypto-lakehouse.streamlit.app/)**. Shows live BTC and ETH candles whenever the pipeline is running, and the last three hours it has when it isn't.
+
 Runs fully local with one `docker compose up`. The same code targets Databricks (Unity Catalog) by switching a config file, not by rewriting jobs.
 
 ## Highlights

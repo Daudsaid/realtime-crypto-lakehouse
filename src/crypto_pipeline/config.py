@@ -1,7 +1,7 @@
 """Pipeline configuration.
 
 Loads conf/<PIPELINE_ENV>.yml into a frozen dataclass. Environment variables override
-connection settings (KAFKA_*, POSTGRES_*) so secrets never live in YAML. PIPELINE_CONF_DIR
+connection settings (KAFKA_*, POSTGRES_*, DATABASE_URL) so secrets never live in YAML. PIPELINE_CONF_DIR
 overrides the conf directory location (needed on Databricks, where the repo is not at /app).
 """
 
@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlparse
 
 import yaml
 
@@ -60,6 +61,24 @@ def _env(name: str, default: Any) -> Any:
     return value if value else default
 
 
+def postgres_from_url(url: str) -> tuple[str, str | None, str | None]:
+    """Split a libpq URL (postgresql://user:pass@host[:port]/db?sslmode=...) into JDBC URL, user, password.
+
+    Hosted Postgres providers (Neon, Supabase) hand out this form. Only `sslmode` is carried into
+    the JDBC URL; other libpq-only parameters such as channel_binding are dropped.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname:
+        raise ValueError("DATABASE_URL must look like postgresql://user:password@host/dbname")
+    port = f":{parsed.port}" if parsed.port else ""
+    sslmode = dict(parse_qsl(parsed.query)).get("sslmode")
+    query = f"?sslmode={sslmode}" if sslmode else ""
+    jdbc_url = f"jdbc:postgresql://{parsed.hostname}{port}{parsed.path}{query}"
+    user = unquote(parsed.username) if parsed.username else None
+    password = unquote(parsed.password) if parsed.password else None
+    return jdbc_url, user, password
+
+
 def load_config(env: str | None = None, conf_dir: str | Path | None = None) -> PipelineConfig:
     """Load the config for `env` (default: $PIPELINE_ENV or 'local'), applying env var overrides."""
     env = env or os.environ.get("PIPELINE_ENV", "local")
@@ -70,6 +89,12 @@ def load_config(env: str | None = None, conf_dir: str | Path | None = None) -> P
     if not contract_path.is_absolute():
         contract_path = conf_dir.parent / contract_path
     kafka, trigger, postgres, storage = raw["kafka"], raw["trigger"], raw["postgres"], raw["storage"]
+    jdbc_url = _env("POSTGRES_JDBC_URL", postgres.get("jdbc_url"))
+    pg_user = _env("POSTGRES_USER", postgres.get("user"))
+    pg_password = _env("POSTGRES_PASSWORD", None)
+    # A full connection string (e.g. a hosted Neon database) takes precedence over the POSTGRES_* parts.
+    if database_url := _env("DATABASE_URL", None):
+        jdbc_url, pg_user, pg_password = postgres_from_url(database_url)
     return PipelineConfig(
         env=env,
         platform=raw["platform"],
@@ -89,9 +114,9 @@ def load_config(env: str | None = None, conf_dir: str | Path | None = None) -> P
             available_now=bool(trigger.get("available_now", False)),
         ),
         postgres=PostgresConfig(
-            jdbc_url=_env("POSTGRES_JDBC_URL", postgres.get("jdbc_url")),
-            user=_env("POSTGRES_USER", postgres.get("user")),
+            jdbc_url=jdbc_url,
+            user=pg_user,
             schema=postgres["schema"],
-            password=_env("POSTGRES_PASSWORD", None),
+            password=pg_password,
         ),
     )

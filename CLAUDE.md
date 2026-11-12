@@ -102,6 +102,12 @@ SERVE: copy gold tables to Postgres schema gold (JDBC, overwrite or upsert per m
 - The pipeline container uses ~2.3 GiB of the ~3.9 GiB available to Docker; keep an eye on it before adding queries.
 - psycopg[binary] added to dependencies, py-spy to dev extras. max_offsets_per_trigger is now 50000 locally.
 
+## Dashboard notes
+- dashboard/app.py: Streamlit + Altair over gold.ohlc_1m JOIN gold.volatility_1m, last 3 hours up to the newest candle (so it shows last known data when the pipeline is offline). Live banner if the newest candle is within 3 min. Not a compose service (keeps the stack light); deployed on Streamlit Community Cloud, secret DATABASE_URL.
+- DATABASE_URL (libpq URL, e.g. Neon) in .env overrides POSTGRES_JDBC_URL/USER/PASSWORD: config.postgres_from_url converts it, keeping only sslmode in the JDBC URL; serve.pg_connect passes URL query params to psycopg. healthcheck.sh reads DATABASE_URL from .env.
+- Colours: BTCUSDT #2a78d6, ETHUSDT #eb6834 (validated categorical slots 1-2). BTC and ETH prices are separate charts (no dual axis).
+- run_all startup on a fresh lake: silver waits for bronze.trades_raw and gold for silver.trades (tables.wait_for_table), otherwise DELTA_SCHEMA_NOT_SET.
+
 ## Roadmap (one step at a time; commit after each)
 2. [DONE] Bronze     -> verify row count grows; restart resumes from checkpoint without duplicates
 3. [DONE] Silver + contract -> verify dedupe + quarantine (inject a bad message into Kafka to prove it)

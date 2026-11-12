@@ -7,3 +7,5 @@ checkpoints/
 spark-warehouse/
 dbt/target/
 dbt/logs/
+.streamlit/secrets.toml
+dashboard/.streamlit/secrets.toml

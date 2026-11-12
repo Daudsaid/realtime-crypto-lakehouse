@@ -1,6 +1,6 @@
 # realtime-crypto-lakehouse
 
-A real-time crypto market-data lakehouse: live Binance trades → Kafka → Spark Structured Streaming → Delta Lake medallion → Postgres, Databricks-ready.
+A real-time crypto market-data lakehouse: live Binance trades → Kafka → Spark Structured Streaming → Delta Lake medallion → Postgres → Streamlit, Databricks-ready.
 
 Runs fully local with one `docker compose up`. The same code targets Databricks (Unity Catalog) by switching a config file, not by rewriting jobs.
 
@@ -34,7 +34,8 @@ flowchart LR
 
     CT[["contracts/crypto_trades.yaml"]] --> SI
     CT --> QU
-    SV --> PG[("Postgres 16<br/>schema gold")]
+    SV --> PG[("Postgres 16<br/>schema gold<br/>local or Neon")]
+    PG --> ST["Streamlit dashboard<br/>Community Cloud"]
 ```
 
 | Layer | Table | Grain | Purpose |
@@ -55,6 +56,7 @@ flowchart LR
 | Processing | PySpark 3.5.9 Structured Streaming, Java 17 | Same engine locally and on Databricks. |
 | Storage | Delta Lake 3.3 (`delta-spark` 3.3.3) | ACID `MERGE`, change data feed, time travel. |
 | Serving | PostgreSQL 16, `psycopg` 3 | Fast dashboard queries; idempotent upserts. |
+| Dashboard | Streamlit, Altair | Public live view of the gold candles, hosted on Streamlit Community Cloud. |
 | Runtime | Docker Compose (OrbStack) | One command brings up the whole lakehouse. |
 | Quality | pytest, ruff | 20 unit tests, linted and formatted. |
 
@@ -111,6 +113,22 @@ To run a single layer by hand, stop `pipeline` first because both use the same c
 docker compose stop pipeline
 docker compose exec spark python -m crypto_pipeline.silver
 ```
+
+## Live dashboard on Streamlit Community Cloud
+
+`dashboard/app.py` is a Streamlit app over `gold.ohlc_1m` and `gold.volatility_1m`: latest BTC and ETH prices, close price per symbol, traded value and one-minute volatility for the last three hours, refreshing every 30 seconds. When the pipeline is offline it shows the last three hours it has, under an "offline" banner, rather than an empty page.
+
+Streamlit Community Cloud hosts only the dashboard. The pipeline keeps running in Docker on your machine and serves gold to a free hosted Postgres ([Neon](https://neon.com)) instead of the local one:
+
+```text
+Laptop (Docker): Binance → Kafka → Spark → Delta → serve ──► Neon Postgres ◄── Streamlit Community Cloud
+```
+
+1. **Create the database.** Create a Neon project (for example in AWS Europe West 2, London) and copy its connection string from **Connect**: `postgresql://USER:PASSWORD@HOST.neon.tech/neondb?sslmode=require`.
+2. **Point the pipeline at it.** Set `DATABASE_URL` in `.env` to that string, then `docker compose up -d`. The serve job creates the `gold` and `staging` tables on start and backfills them from the Delta change feed. `bash scripts/healthcheck.sh` checks the candle count in Neon when `DATABASE_URL` is set.
+3. **Deploy the dashboard.** At [share.streamlit.io](https://share.streamlit.io), create an app from this repository with main file `dashboard/app.py`, and under **Advanced settings → Secrets** paste `DATABASE_URL = "..."` (see `dashboard/.streamlit/secrets.toml.example`).
+
+To run the dashboard locally against the Docker Postgres instead: `pip install -r dashboard/requirements.txt`, then `streamlit run dashboard/app.py`.
 
 ## Data contract
 
@@ -202,9 +220,12 @@ From the gold tables in Postgres (19 Oct 2026 run):
 │   ├── gold.py               1-minute OHLC and volatility candles
 │   ├── serve.py              Change Data Feed to Postgres upserts
 │   └── run_all.py            All four jobs in one SparkSession
+├── dashboard/
+│   ├── app.py                Streamlit dashboard over the gold tables
+│   └── requirements.txt      Dashboard dependencies (Streamlit Community Cloud)
 ├── scripts/
 │   └── healthcheck.sh        Stack smoke test
-└── tests/                    pytest suite (20 tests)
+└── tests/                    pytest suite (28 tests)
 ```
 
 ## Testing
@@ -213,14 +234,15 @@ From the gold tables in Postgres (19 Oct 2026 run):
 docker compose exec spark pytest -q
 ```
 
-20 unit tests run on small static DataFrames with a local Spark session; no Kafka or Delta is needed.
+28 unit tests run on small static DataFrames with a local Spark session; no Kafka or Delta is needed.
 
 | File | Tests | Covers |
 | --- | --- | --- |
 | `tests/test_silver.py` | 6 | Valid trade passes and projects `quote_qty`; negative price, unknown symbol and malformed JSON map to the right reason; dedupe on a duplicate pair. |
 | `tests/test_gold.py` | 6 | OHLC with shuffled input and a same-millisecond tie, volume, VWAP, stddev, range, return, single-tick candles, per-symbol separation. |
 | `tests/test_serve.py` | 5 | Newest-version selection from change-feed batches, delete handling, Postgres DDL and types, upsert SQL. |
-| `tests/test_tables.py` | 3 | Lock-free stop flag and the expected-shutdown log downgrade. |
+| `tests/test_tables.py` | 6 | Lock-free stop flag, the expected-shutdown log downgrade, and waiting for upstream tables on a fresh lakehouse. |
+| `tests/test_config.py` | 5 | `DATABASE_URL` parsing (Neon-style URLs, encoded passwords, ports) and its precedence over `POSTGRES_*`. |
 
 ## Roadmap
 
@@ -230,6 +252,7 @@ Done:
 - [x] Bronze, silver (data contract, dedupe, quarantine) and gold (OHLC, volatility) streaming jobs
 - [x] Idempotent Change Data Feed serving to Postgres
 - [x] Single-session `pipeline` service with clean shutdown
+- [x] Streamlit dashboard on Community Cloud, served from a hosted Postgres
 - [x] Unit tests and lint (run locally in the container)
 
 Next:

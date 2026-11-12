@@ -11,6 +11,8 @@ x-spark: &spark
     POSTGRES_JDBC_URL: jdbc:postgresql://postgres:5432/crypto
     POSTGRES_USER: ${POSTGRES_USER:-crypto}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto}
+    # Optional: serve gold to a hosted Postgres (e.g. Neon) instead of the local one.
+    DATABASE_URL: ${DATABASE_URL:-}
   volumes:
     - ./src:/app/src
     - ./conf:/app/conf

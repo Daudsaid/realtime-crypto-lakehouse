@@ -1,4 +1,4 @@
-"""Serve job: gold Delta tables -> Postgres schema `gold` for querying (local only).
+"""Serve job: gold Delta tables -> Postgres schema `gold` (local, or hosted via DATABASE_URL).
 
 Each gold table's Change Data Feed is streamed into Postgres. Per micro-batch the latest version of
 every changed (symbol, minute) is written to a staging table over JDBC, then upserted into the
@@ -11,7 +11,7 @@ Run: python -m crypto_pipeline.serve
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import psycopg
 from pyspark.sql import DataFrame, SparkSession
@@ -91,7 +91,10 @@ def upsert_sql(table: str, columns: list[str], keys: list[str]) -> str:
 
 
 def pg_connect(cfg: PipelineConfig) -> psycopg.Connection:
-    """Open a psycopg connection from the JDBC URL and credentials in the config."""
+    """Open a psycopg connection from the JDBC URL and credentials in the config.
+
+    Query parameters on the JDBC URL (e.g. sslmode=require for a hosted database) are passed through.
+    """
     url = urlparse(cfg.postgres.jdbc_url.removeprefix("jdbc:"))
     return psycopg.connect(
         host=url.hostname,
@@ -99,6 +102,7 @@ def pg_connect(cfg: PipelineConfig) -> psycopg.Connection:
         dbname=url.path.lstrip("/"),
         user=cfg.postgres.user,
         password=cfg.postgres.password,
+        **dict(parse_qsl(url.query)),
     )
 
 
